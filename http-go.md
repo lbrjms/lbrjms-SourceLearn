@@ -152,7 +152,7 @@ func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
 	handler.ServeHTTP(rw, req)
 }
 ```
-![](images/http-go.png?raw=true)
+![](images/http-go.png)
 
 sh.srv.Handler就是我们刚才在调用函数ListenAndServe时候的第二个参数，
 我们前面例子传递的是nil，也就是为空，那么默认获取handler = DefaultServeMux,
