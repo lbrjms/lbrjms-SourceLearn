@@ -152,6 +152,7 @@ func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
 	handler.ServeHTTP(rw, req)
 }
 ```
+![](images/http-go.png?raw=true)
 
 sh.srv.Handler就是我们刚才在调用函数ListenAndServe时候的第二个参数，
 我们前面例子传递的是nil，也就是为空，那么默认获取handler = DefaultServeMux,
@@ -160,6 +161,5 @@ sh.srv.Handler就是我们刚才在调用函数ListenAndServe时候的第二个�
 这个作用就是注册了请求/的路由规则，当请求uri为"/"，路由就会转到函数sayhelloName，DefaultServeMux会调用ServeHTTP方法，
 这个方法内部其实就是调用sayhelloName本身，最后通过写入response的信息反馈到客户端。
 
-![](images/http-go.png?raw=true)
 
 
