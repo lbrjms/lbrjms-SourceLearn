@@ -31,6 +31,52 @@ Conn：用户的每次请求链接
 
 Handler：处理请求和生成返回信息的处理逻辑
 
+# http代码的执行流程
+通过对http包的分析之后，现在让我们来梳理一下整个的代码执行过程。
+
+首先调用Http.HandleFunc
+
+按顺序做了几件事：
+
+1 调用了DefaultServeMux的HandleFunc
+
+2 调用了DefaultServeMux的Handle
+
+3 往DefaultServeMux的map[string]muxEntry中增加对应的handler和路由规则
+
+其次调用http.ListenAndServe(":9090", nil)
+
+按顺序做了几件事情：
+
+1 实例化Server
+
+2 调用Server的ListenAndServe()
+
+3 调用net.Listen("tcp", addr)监听端口
+
+4 启动一个for循环，在循环体中Accept请求
+
+5 对每个请求实例化一个Conn，并且开启一个goroutine为这个请求进行服务go c.serve()
+
+6 读取每个请求的内容w, err := c.readRequest()
+
+7 判断handler是否为空，如果没有设置handler（这个例子就没有设置handler），handler就设置为DefaultServeMux
+
+8 调用handler的ServeHttp
+
+9 在这个例子中，下面就进入到DefaultServeMux.ServeHttp
+
+10 根据request选择handler，并且进入到这个handler的ServeHTTP
+
+mux.handler(r).ServeHTTP(w, r)
+11 选择handler：
+
+A 判断是否有路由能满足这个request（循环遍历ServeMux的muxEntry）
+
+B 如果有路由满足，调用这个路由handler的ServeHTTP
+
+C 如果没有路由满足，调用NotFoundHandler的ServeHTTP
+
 ## 基本使用
 
 ```
@@ -162,4 +208,132 @@ sh.srv.Handler就是我们刚才在调用函数ListenAndServe时候的第二个�
 这个方法内部其实就是调用sayhelloName本身，最后通过写入response的信息反馈到客户端。
 
 
+
+
+
+
+# ServeMux
+
+conn.server 内部是调用了http包默认的路由器，通过路由器把本次请求的信息传递到了后端的处理函数
+```
+type ServeMux struct {
+	mu sync.RWMutex   //锁，由于请求涉及到并发处理，因此这里需要一个锁机制
+	m  map[string]muxEntry  // 路由规则，一个string对应一个mux实体，这里的string就是注册的路由表达式
+	hosts bool // 是否在任意的规则中带有host信息
+}
+```
+```
+type muxEntry struct {
+	explicit bool   // 是否精确匹配
+	h        Handler // 这个路由表达式对应哪个handler
+	pattern  string  //匹配字符串
+}
+```
+```
+type Handler interface {
+	ServeHTTP(ResponseWriter, *Request)  // 路由实现器
+}
+```
+
+Handler是一个接口，
+sayhelloName函数并没有实现ServeHTTP这个接口，为什么能添加呢？
+原来在http包里面还定义了一个类型HandlerFunc,我们定义的函数sayhelloName就是这个HandlerFunc调用之后的结果，
+这个类型默认就实现了ServeHTTP这个接口，即我们调用了HandlerFunc(f),
+强制类型转换f成为HandlerFunc类型，这样f就拥有了ServeHTTP方法。
+
+```
+type HandlerFunc func(ResponseWriter, *Request)
+
+// ServeHTTP calls f(w, r).
+func (f HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
+	f(w, r)
+}
+```
+
+如上所示路由器接收到请求之后，如果是*那么关闭链接，不然调用mux.Handler(r)返回对应设置路由的处理Handler，然后执行h.ServeHTTP(w, r)
+
+也就是调用对应路由的handler的ServerHTTP接口，那么mux.Handler(r)怎么处理的呢？
+
+路由器里面存储好了相应的路由规则之后，那么具体的请求又是怎么分发的呢？请看下面的代码，默认的路由器实现了ServeHTTP：
+```
+func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
+	if r.RequestURI == "*" {
+		w.Header().Set("Connection", "close")
+		w.WriteHeader(StatusBadRequest)
+		return
+	}
+	h, _ := mux.Handler(r)
+	h.ServeHTTP(w, r)
+}
+```
+
+如上所示路由器接收到请求之后，如果是*那么关闭链接，不然调用mux.Handler(r)返回对应设置路由的处理Handler，然后执行h.ServeHTTP(w, r)
+
+也就是调用对应路由的handler的ServerHTTP接口，那么mux.Handler(r)怎么处理的呢？
+```
+
+func (mux *ServeMux) Handler(r *Request) (h Handler, pattern string) {
+	if r.Method != "CONNECT" {
+		if p := cleanPath(r.URL.Path); p != r.URL.Path {
+			_, pattern = mux.handler(r.Host, p)
+			return RedirectHandler(p, StatusMovedPermanently), pattern
+		}
+	}	
+	return mux.handler(r.Host, r.URL.Path)
+}
+
+func (mux *ServeMux) handler(host, path string) (h Handler, pattern string) {
+	mux.mu.RLock()
+	defer mux.mu.RUnlock()
+
+	// Host-specific pattern takes precedence over generic ones
+	if mux.hosts {
+		h, pattern = mux.match(host + path)
+	}
+	if h == nil {
+		h, pattern = mux.match(path)
+	}
+	if h == nil {
+		h, pattern = NotFoundHandler(), ""
+	}
+	return
+}
+```
+
+原来他是根据用户请求的URL和路由器里面存储的map去匹配的，当匹配到之后返回存储的handler，调用这个handler的ServeHTTP接口就可以执行到相应的函数了。
+
+通过上面这个介绍，我们了解了整个路由过程，Go其实支持外部实现的路由器 ListenAndServe的第二个参数就是用以配置外部路由器的，它是一个Handler接口，即外部路由器只要实现了Handler接口就可以,我们可以在自己实现的路由器的ServeHTTP里面实现自定义路由功能。
+
+如下代码所示，我们自己实现了一个简易的路由器
+
+```
+
+package main
+
+import (
+	"fmt"
+	"net/http"
+)
+
+type MyMux struct {
+}
+
+func (p *MyMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/" {
+		sayhelloName(w, r)
+		return
+	}
+	http.NotFound(w, r)
+	return
+}
+
+func sayhelloName(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "Hello myroute!")
+}
+
+func main() {
+	mux := &MyMux{}
+	http.ListenAndServe(":9090", mux)
+}
+```
 
